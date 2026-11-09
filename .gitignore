@@ -1,5 +1,20 @@
+# ===== SECURITY =====
 .env
-__pycache__/
+.env.local
+
+# ===== DATABASE =====
 *.db
+*.sqlite
+router_data.db
 .streamlit/
+# ===== PYTHON =====
+__pycache__/
+*.py[cod]
+
+# ===== TESTING =====
+.pytest_cache/
+test/check_db.py        # ← أداة مؤقتة
+test/test_execute.py    # ← اختبار يدوي
 calibrate.py
+# ===== VENV =====
+venv/

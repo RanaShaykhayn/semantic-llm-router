@@ -16,27 +16,31 @@ def init_db():
     conn.close()
     print("successful ac")
 # Log request metadata: document every system interaction
-def log_query(data:dict) ->None:
-    conn=sqlite3.connect(db_path)
-    cursor=conn.cursor()
+def log_query(data: dict) -> None:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
     cursor.execute("""
-INSERT INTO query_logs( raw_query, cleaned_query, true_label, predicted_route,
-was_cache_hit, input_tokens, output_tokens, real_cost, latency_ms)
-
-VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?) 
-                   """, (
-            data.get("raw_query"),
-            data.get("cleaned_query"),
-            data.get("true_label"),       
-            data.get("predicted_route"),
-            data.get("was_cache_hit", False),
-            data.get("input_tokens"),     
-            data.get("output_tokens"),    
-            data.get("real_cost"),       
-            data.get("latency_ms"),
-        ),
- )
-    
+        INSERT INTO query_logs(
+            raw_query, cleaned_query, true_label, predicted_route,
+            was_cache_hit, input_tokens, output_tokens, real_cost, latency_ms,
+            preprocess_ms, embedding_ms, cache_ms, routing_ms, generation_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        data.get("raw_query"),
+        data.get("cleaned_query"),
+        data.get("true_label"),
+        data.get("predicted_route"),
+        data.get("was_cache_hit", False),
+        data.get("input_tokens"),
+        data.get("output_tokens"),
+        data.get("real_cost"),
+        data.get("latency_ms"),
+        data.get("preprocess_ms"),
+        data.get("embedding_ms"),
+        data.get("cache_ms"),
+        data.get("routing_ms"),
+        data.get("generation_ms"),
+    ))
     conn.commit()
     conn.close()
 
@@ -90,7 +94,26 @@ def get_estimated_cost(route: str) -> tuple[float, int] | tuple[None, int]:
         return None, sample_size
     return avg_cost, sample_size
 
-if __name__=="__main__":
- init_db()
+
+
+def get_estimated_latency(route: str) -> tuple[float, int] | tuple[None, int]:
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT AVG(latency_ms), COUNT(*)
+        FROM query_logs
+        WHERE predicted_route = ? AND latency_ms IS NOT NULL
+        """,
+        (route,)
+    )
+    avg_latency, sample_size = cursor.fetchone()
+    conn.close()
+    if sample_size < 5:
+        return None, sample_size
+    return avg_latency, sample_size
+
+if __name__ == "__main__":             
+    init_db()
     
 

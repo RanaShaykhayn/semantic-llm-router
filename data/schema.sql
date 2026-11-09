@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS query_logs(
     output_tokens INTEGER,
     real_cost REAL,
     latency_ms REAL NOT NULL,
+    preprocess_ms REAL,
+    embedding_ms REAL,
+    cache_ms REAL,
+    routing_ms REAL,
+    generation_ms REAL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS evaluation_runs(

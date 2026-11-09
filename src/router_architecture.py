@@ -5,13 +5,14 @@ from dotenv import load_dotenv
 from google.genai import errors as genai_errors
 import time
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from .database import log_query, get_estimated_cost
+from .database import log_query, get_estimated_cost, get_estimated_latency
 from .config import (
     REFERENCE_GREETINGS, REFERENCE_COMPLEX,
     CACHE_TTL_SECONDS, CACHE_MAX_SIZE,
     SIMILARITY_THRESHOLD_COMPLEX, SIMILARITY_THRESHOLD_GREETING, SIMILARITY_THRESHOLD_CACHE,
     GEMINI_FLASH_INPUT_PRICE, GEMINI_FLASH_OUTPUT_PRICE,
     GEMINI_PRO_INPUT_PRICE, GEMINI_PRO_OUTPUT_PRICE,
+    MAX_LATENCY_MS,  
 )
 
 load_dotenv() 
@@ -27,7 +28,6 @@ class SemanticLLMRouter:
         self.CACHE_TTL = CACHE_TTL_SECONDS
         self.reference_complex = REFERENCE_COMPLEX
         self._complex_vectors = np.array([self.get_embedding(c) for c in self.reference_complex])
-
         self.reference_greetings = REFERENCE_GREETINGS
         self._greeting_vectors = np.array([self.get_embedding(g) for g in self.reference_greetings])
 
@@ -127,7 +127,10 @@ class SemanticLLMRouter:
         greet_similarities = self.batch_cosine_similarity(self._greeting_vectors, user_vector)
         max_greet_similarity = float(np.max(greet_similarities))
 
-        if max_complex_similarity > max_greet_similarity and max_complex_similarity >= SIMILARITY_THRESHOLD_COMPLEX:
+        if max_complex_similarity >= SIMILARITY_THRESHOLD_COMPLEX:
+            estimated_pro_latency, _ = get_estimated_latency(self.gemini_pro)
+            if estimated_pro_latency is not None and estimated_pro_latency > MAX_LATENCY_MS:
+             return self.gemini_flash
             return self.gemini_pro
         
         elif max_greet_similarity >= SIMILARITY_THRESHOLD_GREETING:
@@ -143,83 +146,132 @@ class SemanticLLMRouter:
         user_vector = self.get_embedding(cleaned_text)
         return self.prepare_routing_engine(user_vector)
 
-    def execute_routing(self, user_input: str | None) -> dict:
+    def _prepare_input(self, user_input:str|None)->str|None:
+        cleaned=self.preprocess_text(user_input)
+        if not cleaned:
+            return None
+        return cleaned
 
-        """Process a query full pipeline including cache lookup, routing, execution, and telemetry logging"""
-        
-        start_time = time.time()
-        
-        cleaned_text = self.preprocess_text(user_input)
-        if not cleaned_text:
-            return {"route": "Empty Input", "response": "Please enter a valid text.", "money_saved": 0.0}
-        user_vector = self.get_embedding(cleaned_text)
-        cached_response, cached_cost = self.check_semantic_cache(user_vector)
-        if cached_response:
-            latency = (time.time() - start_time) * 1000
-            log_query({
-                "raw_query": user_input, "cleaned_query": cleaned_text,
-                "predicted_route": "Semantic Cache (Hit)", "was_cache_hit": True,
-                "latency_ms": latency,
-            })
-            return {"route": "Semantic Cache (Hit)", "response": cached_response, "money_saved": cached_cost}
-        target_route = self.prepare_routing_engine(user_vector)
+    def _check_cache(self, user_input:str,cleaned:str,vector:np.ndarray,start_time:float)->dict|None:
+        cached_response,cached_cost=self.check_semantic_cache(vector)
+        if cached_response is None:
+            return None
+        latency=(time.time()-start_time)*1000
+        log_query({
+            "raw_query": user_input,
+            "cleaned_query":cleaned,
+            "predicted_route":"Semantic Cache (Hit)",
+            "was_cache_hit":True,
+            "latency_ms":latency,
+        })
+        return{
+            "route":"Semantic Cache (Hit)",
+            "response":cached_response,
+            "money_saved":cached_cost,
+        }
 
+    def _generate_response(self, user_input:str, route:str)->dict:
+        if route=="Local Simulator":
+            return{
+                "response":"Hello! How can I assist you today?",
+                "input_tokens":0,
+                "output_tokens":0,
+                "cost":0.0,
+            }
+        api_response=self.client.models.generate_content(
+            model=route,
+            contents=user_input,
+        )
+        usage=api_response.usage_metadata
+        input_tokens=usage.prompt_token_count
+        output_tokens=usage.candidates_token_count
+        if route==self.gemini_flash:
+            in_price, out_price= GEMINI_FLASH_INPUT_PRICE, GEMINI_FLASH_OUTPUT_PRICE
+        else:
+            in_price, out_price= GEMINI_PRO_INPUT_PRICE, GEMINI_PRO_OUTPUT_PRICE
+        cost=(input_tokens/1_000_000*in_price)+(output_tokens/1_000_000*out_price)
+        return{
+            "response":api_response.text,
+            "input_tokens":input_tokens,
+            "output_tokens":output_tokens,
+            "cost":cost,
+        }
+
+    def execute_routing(self, user_input:str|None)->dict:
+
+        start_time=time.time()
+
+        t1 = time.time()
+        cleaned=self._prepare_input(user_input)
+        preprocess_ms = (time.time() - t1) * 1000
+        if cleaned is None:
+            return{
+                "route":"Empty Input", "response":"Please enter a valid text.","money_saved":0.0}
+      
+      
+        t2 = time.time()
+        user_vector= self.get_embedding(cleaned)
+        embedding_ms = (time.time() - t2) * 1000
+
+
+        t3 = time.time()
+        cached=self._check_cache(user_input, cleaned,user_vector, start_time)
+        cache_ms = (time.time() - t3) * 1000
+        if cached is not None:
+            return cached
+
+        t4 = time.time()
+        target_route=self.prepare_routing_engine(user_vector)
+        routing_ms = (time.time() - t4) * 1000
+        
         try:
-            if target_route == "Local Simulator":
-                response = "Hello! How can I assist you today?"
-                input_tokens = output_tokens = real_cost = 0
-            else: 
-                api_response = self.client.models.generate_content(model=target_route, contents=user_input)
-                response = api_response.text
-                usage = api_response.usage_metadata
-                input_tokens = usage.prompt_token_count
-                output_tokens = usage.candidates_token_count
-                if target_route == self.gemini_flash:
-                    input_price, output_price = GEMINI_FLASH_INPUT_PRICE, GEMINI_FLASH_OUTPUT_PRICE
-                else:
-                    input_price, output_price = GEMINI_PRO_INPUT_PRICE, GEMINI_PRO_OUTPUT_PRICE
-
-                real_cost = (input_tokens / 1_000_000 * input_price) + (output_tokens / 1_000_000 * output_price)
-
-            self.update_cache(cleaned_text, user_vector, response, real_cost)
-            latency = (time.time() - start_time) * 1000
-
+            t5 = time.time()
+            result= self._generate_response(user_input, target_route)
+            generation_ms = (time.time() - t5) * 1000
+            self.update_cache(cleaned, user_vector, result["response"],result["cost"])
+            latency=(time.time()-start_time)*1000
             log_query({
-                "raw_query": user_input, "cleaned_query": cleaned_text,
-                "predicted_route": target_route, "was_cache_hit": False,
-                "input_tokens": input_tokens, "output_tokens": output_tokens,
-                "real_cost": real_cost, "latency_ms": latency,
+                "raw_query":user_input,
+                "cleaned_query":cleaned,
+                "predicted_route":target_route,
+                "was_cache_hit":False,
+                "input_tokens":result["input_tokens"],
+                "output_tokens":result["output_tokens"],
+                "real_cost":result["cost"],
+                "latency_ms":latency,
+                "preprocess_ms": preprocess_ms,      
+                "embedding_ms": embedding_ms,        
+                "cache_ms": cache_ms,               
+                "routing_ms": routing_ms,           
+                "generation_ms": generation_ms,  
             })
-
-            return {"route": target_route, "response": response, "money_saved": 0.0}
-
+            return{"route":target_route, "response":result["response"],"money_saved":0.0}
         except genai_errors.ClientError as e:
-            latency = (time.time() - start_time) * 1000
-            estimated_tokens = len(user_input.split())
-
-            if e.code == 429:
-                friendly_message = (
-                    f"⚠️ Rate limit reached for model{target_route}  "
-                    f"   Approximate word count: {estimated_tokens}"
-                )
+            latency=(time.time()-start_time)*1000
+            if e.code==429:
+                msg=f"⚠️ Rate limit reached for {target_route}"
             else:
-                friendly_message = f"⚠️ Please try again later {e.code})"
-
+                msg=f"⚠️ API error ({e.code})"
             log_query({
-                "raw_query": user_input, "cleaned_query": cleaned_text,
-                "predicted_route": "Fallback", "was_cache_hit": False, "latency_ms": latency,
+                "raw_query":user_input,
+                "cleaned_query":cleaned,
+                "predicted_route":"Fallback",
+                "was_cache_hit":False,
+                "latency_ms":latency,
             })
-            return {"route": "Fallback", "response": friendly_message, "money_saved": 0.0}
-
+            return {"route":"Fallback", "response":msg,"money_saved":0.0}
         except Exception:
-            latency = (time.time() - start_time) * 1000
+            latency=(time.time()-start_time)*1000
             log_query({
-                "raw_query": user_input, "cleaned_query": cleaned_text,
-                "predicted_route": "Fallback", "was_cache_hit": False, "latency_ms": latency,
+                "raw_query":user_input,
+                "cleaned_query":cleaned,
+                "predicted_route":"Fallback",
+                "was_cache_hit":False,
+                "latency_ms":latency,
             })
-            return {"route": "Fallback", "response": "⚠️ An unexpected error occurred in the system", "money_saved": 0.0}
-   
- 
+            return{"route":"Fallback", "response":"⚠️ Unexpected error", "money_saved":0.0}
+        
+        
 
 
  
