@@ -1,16 +1,27 @@
-# src/config.py
 REFERENCE_GREETINGS = [
+    # English
     "hello",
     "hi there",
     "good morning",
-    "how are you doing?"
+    "how are you doing?",
+    # Arabic
+    "مرحبا",
+    "أهلاً",
+    "صباح الخير",
+    "كيف حالك؟",
 ]
 
 REFERENCE_COMPLEX = [
+    # English
     "explain quantum computing in simple terms",
     "write a python script for scraping",
     "design a system architecture for a web app",
-    "analyze the philosophical implications of AI"
+    "analyze the philosophical implications of AI",
+    # Arabic
+    "اشرح الحوسبة الكمومية ببساطة",
+    "اكتب سكربت بايثون لجمع البيانات",
+    "صمم بنية نظام لتطبيق ويب",
+    "حلل الآثار الفلسفية للذكاء الاصطناعي",
 ]
 
 CACHE_TTL_SECONDS = 86400

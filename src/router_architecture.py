@@ -4,6 +4,8 @@ import numpy as np
 from dotenv import load_dotenv 
 from google.genai import errors as genai_errors
 import time
+import re
+from .schemas import RoutingResult
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from .database import log_query, get_estimated_cost, get_estimated_latency
 from .config import (
@@ -123,7 +125,7 @@ class SemanticLLMRouter:
         complex_similarities = self.batch_cosine_similarity(self._complex_vectors, user_vector)
         # Extract the highest similarity score (best match)
         max_complex_similarity = float(np.max(complex_similarities))
-        print(f"max_complex_similarity: {max_complex_similarity:.4f}")
+       # print(f"max_complex_similarity: {max_complex_similarity:.4f}")
         greet_similarities = self.batch_cosine_similarity(self._greeting_vectors, user_vector)
         max_greet_similarity = float(np.max(greet_similarities))
 
@@ -163,6 +165,7 @@ class SemanticLLMRouter:
             "predicted_route":"Semantic Cache (Hit)",
             "was_cache_hit":True,
             "latency_ms":latency,
+            "error_message": None,
         })
         return{
             "route":"Semantic Cache (Hit)",
@@ -197,6 +200,41 @@ class SemanticLLMRouter:
             "cost":cost,
         }
 
+    def _is_prompt_injection(self, text:str)->bool:
+        patterns=[
+            r"ignore (all )?previous instructions",
+            r"تجاهل (كل )?التعليمات السابقة",
+            r"system prompt",
+            r"you are now",
+            r"أنت الآن",
+        ]
+        text_lower=text.lower()
+        for pattern in patterns:
+            if re.search(pattern, text_lower):
+                return True
+        return False
+
+    
+    def _log_success(self, user_input, cleaned, target_route, result, latency, preprocess_ms, embedding_ms, cache_ms, routing_ms, generation_ms):
+           log_query({
+            "raw_query": user_input,
+            "cleaned_query": cleaned,
+            "predicted_route": target_route,
+            "was_cache_hit": False,
+            "input_tokens": result["input_tokens"],
+            "output_tokens": result["output_tokens"],
+            "real_cost": result["cost"],
+            "latency_ms": latency,
+            "preprocess_ms": preprocess_ms,
+            "embedding_ms": embedding_ms,
+            "cache_ms": cache_ms,
+            "routing_ms": routing_ms,
+            "generation_ms": generation_ms,
+            "error_message": None,
+        })
+
+    
+
     def execute_routing(self, user_input:str|None)->dict:
 
         start_time=time.time()
@@ -207,6 +245,8 @@ class SemanticLLMRouter:
         if cleaned is None:
             return{
                 "route":"Empty Input", "response":"Please enter a valid text.","money_saved":0.0}
+        if self._is_prompt_injection(cleaned):
+            return{"route": "Blocked (Injection)", "response": "⚠️ Security Alert: Prompt injection detected.", "money_saved": 0.0}
       
       
         t2 = time.time()
@@ -230,22 +270,14 @@ class SemanticLLMRouter:
             generation_ms = (time.time() - t5) * 1000
             self.update_cache(cleaned, user_vector, result["response"],result["cost"])
             latency=(time.time()-start_time)*1000
-            log_query({
-                "raw_query":user_input,
-                "cleaned_query":cleaned,
-                "predicted_route":target_route,
-                "was_cache_hit":False,
-                "input_tokens":result["input_tokens"],
-                "output_tokens":result["output_tokens"],
-                "real_cost":result["cost"],
-                "latency_ms":latency,
-                "preprocess_ms": preprocess_ms,      
-                "embedding_ms": embedding_ms,        
-                "cache_ms": cache_ms,               
-                "routing_ms": routing_ms,           
-                "generation_ms": generation_ms,  
-            })
-            return{"route":target_route, "response":result["response"],"money_saved":0.0}
+            self._log_success(user_input, cleaned, target_route, result, latency, preprocess_ms, embedding_ms, cache_ms, routing_ms, generation_ms)
+            validated_result=RoutingResult(
+                route=target_route,
+                response=result["response"],
+                money_saved=0.0,
+                latency_ms=latency
+            )
+            return validated_result.model_dump()
         except genai_errors.ClientError as e:
             latency=(time.time()-start_time)*1000
             if e.code==429:
@@ -258,9 +290,11 @@ class SemanticLLMRouter:
                 "predicted_route":"Fallback",
                 "was_cache_hit":False,
                 "latency_ms":latency,
+                "error_message": str(e),
+                
             })
             return {"route":"Fallback", "response":msg,"money_saved":0.0}
-        except Exception:
+        except Exception as e:
             latency=(time.time()-start_time)*1000
             log_query({
                 "raw_query":user_input,
@@ -268,11 +302,12 @@ class SemanticLLMRouter:
                 "predicted_route":"Fallback",
                 "was_cache_hit":False,
                 "latency_ms":latency,
+                "error_message": str(e), 
             })
             return{"route":"Fallback", "response":"⚠️ Unexpected error", "money_saved":0.0}
         
-        
 
+    
 
  
 

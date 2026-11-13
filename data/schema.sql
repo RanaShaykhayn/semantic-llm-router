@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS query_logs(
     cache_ms REAL,
     routing_ms REAL,
     generation_ms REAL,
+    error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS evaluation_runs(

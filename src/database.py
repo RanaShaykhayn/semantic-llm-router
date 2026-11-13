@@ -23,8 +23,8 @@ def log_query(data: dict) -> None:
         INSERT INTO query_logs(
             raw_query, cleaned_query, true_label, predicted_route,
             was_cache_hit, input_tokens, output_tokens, real_cost, latency_ms,
-            preprocess_ms, embedding_ms, cache_ms, routing_ms, generation_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            preprocess_ms, embedding_ms, cache_ms, routing_ms, generation_ms , error_message
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         data.get("raw_query"),
         data.get("cleaned_query"),
@@ -40,6 +40,7 @@ def log_query(data: dict) -> None:
         data.get("cache_ms"),
         data.get("routing_ms"),
         data.get("generation_ms"),
+        data.get("error_message"),
     ))
     conn.commit()
     conn.close()
