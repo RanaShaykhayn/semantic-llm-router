@@ -8,6 +8,7 @@ import re
 from .schemas import RoutingResult
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from .database import log_query, get_estimated_cost, get_estimated_latency
+from .retriever import SimpleRetriever
 from .config import (
     REFERENCE_GREETINGS, REFERENCE_COMPLEX,
     CACHE_TTL_SECONDS, CACHE_MAX_SIZE,
@@ -32,6 +33,9 @@ class SemanticLLMRouter:
         self._complex_vectors = np.array([self.get_embedding(c) for c in self.reference_complex])
         self.reference_greetings = REFERENCE_GREETINGS
         self._greeting_vectors = np.array([self.get_embedding(g) for g in self.reference_greetings])
+        self.retriever=SimpleRetriever()
+        self.retriever.load_documents("documents")
+        self.retriever.build_vectors()
 
     def preprocess_text(self, text: str | None) -> str:
 
@@ -233,6 +237,37 @@ class SemanticLLMRouter:
             "error_message": None,
         })
 
+
+    def _generate_with_rag(self, user_input:str)->dict|None:
+        retrieved=self.retriever.search(user_input, top_k=2)
+        if not retrieved or retrieved[0]["score"]<0.60:
+            return None
+
+        context="\n".join([f"- {r['text']}" for r in retrieved])
+
+        augmented_prompt=f"""Answer the question based ONLY on the following context:
+        {context}
+
+        Question: {user_input}
+
+        Answer:"""
+        api_response = self.client.models.generate_content(
+            model=self.gemini_flash,
+            contents=augmented_prompt,
+        )
+        usage = api_response.usage_metadata
+        input_tokens = usage.prompt_token_count
+        output_tokens = usage.candidates_token_count
+        cost = (input_tokens / 1_000_000 * GEMINI_FLASH_INPUT_PRICE) + \
+               (output_tokens / 1_000_000 * GEMINI_FLASH_OUTPUT_PRICE)
+        
+        return {
+            "response": api_response.text,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
+        }
+
     
 
     def execute_routing(self, user_input:str|None)->dict:
@@ -263,6 +298,22 @@ class SemanticLLMRouter:
         t4 = time.time()
         target_route=self.prepare_routing_engine(user_vector)
         routing_ms = (time.time() - t4) * 1000
+        rag_result = self._generate_with_rag(user_input)
+        if rag_result is not None:
+            latency = (time.time() - start_time) * 1000
+            self.update_cache(cleaned, user_vector, rag_result["response"], rag_result["cost"])
+            self._log_success(
+                user_input, cleaned, "RAG (Flash)", rag_result,
+                latency, preprocess_ms, embedding_ms, cache_ms, routing_ms, 0.0
+            )
+            validated = RoutingResult(
+                route="RAG (Flash)",
+                response=rag_result["response"],
+                money_saved=0.0,
+                latency_ms=latency
+            )
+            return validated.model_dump()
+        
         
         try:
             t5 = time.time()
