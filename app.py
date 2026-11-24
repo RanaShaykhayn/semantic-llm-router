@@ -1,7 +1,8 @@
 import streamlit as st
 from src.router_architecture import SemanticLLMRouter
 from src.database import get_estimated_cost
-
+from src.database import init_db
+init_db()
 @st.cache_resource
 def get_router():
     return SemanticLLMRouter()

@@ -1,7 +1,9 @@
 google-genai
 numpy
-python-dotenv
 streamlit
-pandas
+pydantic
+tenacity
+python-dotenv
 datasets
 langdetect
+pytest
